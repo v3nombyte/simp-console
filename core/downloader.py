@@ -291,6 +291,9 @@ class URLResolver:
         # turbo.cr
         if 'turbo.cr' in host:
             return 'browser'
+        # goonbox.cr
+        if 'goonbox.cr' in host:
+            return 'browser'
         # mega.nz
         if 'mega.nz' in host or 'mega.co.nz' in host:
             return 'mega'
@@ -944,6 +947,8 @@ class URLResolver:
 
             if 'turbo.cr' in host:
                 resolved_url = await self._resolve_turbo(page, url, timeout)
+            elif 'goonbox.cr' in host:
+                resolved_url = await self._resolve_goonbox(page, url, timeout)
             elif 'bunkr' in host:
                 resolved_url = await self._resolve_bunkr_browser(page, url, timeout)
             elif 'cyberdrop' in host or 'cyberfile' in host:
@@ -1218,6 +1223,41 @@ class URLResolver:
                 }''')
                 if urls:
                     return urls
+            except Exception:
+                pass
+            await asyncio.sleep(1)
+        return None
+
+    async def _resolve_goonbox(self, page, url: str, timeout: int) -> Optional[str]:
+        """Resolve goonbox.cr image page via browser (React SPA).
+
+        goonbox.cr is a React SPA (Laravel + Inertia). Images are loaded
+        client-side from the API and rendered in an <img> tag.
+        """
+        try:
+            await page.goto(url, timeout=timeout * 1000, wait_until='networkidle')
+        except Exception:
+            pass
+
+        for _ in range(12):
+            try:
+                # Check for "Image not found" heading
+                not_found = await page.evaluate(
+                    'document.querySelector("h2")?.textContent?.includes("Image not found")'
+                )
+                if not_found:
+                    _log(f'GoonBox image not found: {url[:60]}', 'WARN')
+                    return None
+
+                # Extract the main image src — the React app renders an <img>
+                # with one of the image CDN URLs (original/medium/thumb).
+                src = await page.evaluate('''() => {
+                    const img = document.querySelector('main img');
+                    if (img && img.src && img.src.startsWith('http')) return img.src;
+                    return '';
+                }''')
+                if src:
+                    return src
             except Exception:
                 pass
             await asyncio.sleep(1)
