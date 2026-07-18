@@ -230,14 +230,25 @@ class URLResolver:
             _log(f'Browser launch failed: {e}', 'WARN')
             self._browser = None
 
-    async def close(self):
+    async def _close_browser(self):
+        """Close the browser AND the Playwright driver process properly."""
         if self._browser:
-            await self._browser.close()
+            try:
+                await self._browser.close()
+            except Exception:
+                pass
+            self._browser = None
+            self._context = None
         if self._playwright_ctx:
-            await self._playwright_ctx.__aexit__(None, None, None)
-        self._browser = None
-        self._playwright = None
-        self._playwright_ctx = None
+            try:
+                await self._playwright_ctx.__aexit__(None, None, None)
+            except Exception:
+                pass
+            self._playwright = None
+            self._playwright_ctx = None
+
+    async def close(self):
+        await self._close_browser()
         self._session.close()
 
     # ── Host classification helpers ─────────────────────────────────
@@ -949,15 +960,7 @@ class URLResolver:
         self._resolve_count += 1
         if self._resolve_count >= 10:
             # Recycle browser context to avoid memory leaks, keep session alive
-            if self._browser:
-                try:
-                    await self._browser.close()
-                except Exception:
-                    pass
-                self._browser = None
-                self._context = None
-                self._playwright = None
-                self._playwright_ctx = None
+            await self._close_browser()
             self._resolve_count = 0
 
         return resolved_url
@@ -1465,6 +1468,9 @@ class URLResolver:
                     result[url] = None
                 else:
                     result[url] = rurl
+            # Close browser immediately after batch — don't let idle Chromium
+            # processes eat RAM during the download phase.
+            await self._close_browser()
 
         return result
 
