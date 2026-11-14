@@ -7,7 +7,7 @@ Host support:
   - Referer-based: pixhost.to, imagepond, imagebam, imgbox
   - API-based: gofile.io, pixeldrain.com, goonbox.cr
   - HTTP scrape: bunkr, cyberdrop, coomer, sendvid, erome
-  - Playwright: jpg6.su, turbo.cr, selti-delivery (legacy)
+  - Playwright: jpg6.su, turbo.cr, selti-delivery
 """
 
 import asyncio
@@ -203,12 +203,12 @@ class URLResolver:
     def _build_session(pixeldrain_api_key: str = "") -> requests.Session:
         s = requests.Session()
         s.headers.update({
-            'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:159.0) Gecko/20100101 Firefox/159.0',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
         })
         if pixeldrain_api_key:
             s.headers.update({'X-API-Key': pixeldrain_api_key})
-        retry = Retry(total=3, backoff_factor=1, status_forcelist=[429, 500, 502, 503])
+        retry = Retry(total=3, backoff_factor=5, status_forcelist=[429, 500, 502, 503])
         adapter = HTTPAdapter(max_retries=retry)
         s.mount('http://', adapter)
         s.mount('https://', adapter)
@@ -231,7 +231,7 @@ class URLResolver:
                     args=['--no-sandbox', '--disable-blink-features=AutomationControlled'],
                 )
                 self._context = await self._browser.new_context(
-                    user_agent='Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+                    user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:159.0) Gecko/20100101 Firefox/159.0',
                     viewport={'width': 1920, 'height': 1080},
                 )
                 await self._context.add_init_script(
@@ -618,7 +618,7 @@ class URLResolver:
         Returns the first image's full URL (each image will be resolved individually).
         """
         try:
-            resp = self._session.get(url, timeout=15, headers={'User-Agent': 'Mozilla/5.0'})
+            resp = self._session.get(url, timeout=15, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:159.0) Gecko/20100101 Firefox/159.0'})
             if resp.status_code != 200:
                 return None
             html = resp.text
@@ -841,7 +841,7 @@ class URLResolver:
                     path = repaired_path
             sign_url = f'{sign_api_url.rstrip("/")}?path={path}'
             resp = self._session.get(sign_url, timeout=15, headers={
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:159.0) Gecko/20100101 Firefox/159.0',
                 'Referer': sign_api_url,
                 'Accept': 'application/json',
             })
@@ -1942,7 +1942,7 @@ class DownloadManager:
     }
 
     def __init__(self, output_base: str = 'output', max_speed_bps: int = 1_000_000,
-                 max_concurrent: int = 3, pixeldrain_api_key: str = "",
+                 max_concurrent: int = 1, pixeldrain_api_key: str = "",
                  pixeldrain_cookies_json: str = "",
                  models_data_dir: str | None = None):
         self.output_base = output_base
@@ -1954,13 +1954,13 @@ class DownloadManager:
 
         self.session = requests.Session()
         self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:159.0) Gecko/20100101 Firefox/159.0',
         })
         if pixeldrain_api_key:
             self.session.headers.update({'X-API-Key': pixeldrain_api_key})
         if pixeldrain_cookies_json:
             _set_pixeldrain_cookies(self.session, pixeldrain_cookies_json)
-        retry = Retry(total=3, backoff_factor=1, status_forcelist=[429, 500, 502, 503])
+        retry = Retry(total=3, backoff_factor=10, status_forcelist=[429, 500, 502, 503])
         adapter = HTTPAdapter(max_retries=retry)
         self.session.mount('http://', adapter)
         self.session.mount('https://', adapter)
@@ -2066,53 +2066,92 @@ class DownloadManager:
         # ── Blocking HTTP work runs in a thread to free the event loop ──
         def _do_download() -> tuple:
             """Synchronous download body. Returns a result tuple."""
+            active_url = resolved_url
             headers = {}
             referer = self._get_referer(resolved_url or url)
             if referer:
                 headers['Referer'] = referer
 
+            full_path = None
             max_attempts = 3
+
             for attempt in range(max_attempts):
                 resp = None
-                full_path = None
                 filename = ""
                 downloaded = 0
+                existing_size = 0
+            
+                # 1. Prepare dynamic headers for resuming
+                req_headers = headers.copy() if headers else {}
+                if attempt > 0 and full_path and os.path.exists(full_path):
+                    existing_size = os.path.getsize(full_path)
+                    if existing_size > 0:
+                        req_headers['Range'] = f"bytes={existing_size}-"
+
                 try:
                     resp = self.session.get(
-                        resolved_url or url, stream=True, timeout=120, headers=headers
+                        active_url or url, stream=True, timeout=120, headers=req_headers
                     )
-                    if resp.status_code != 200:
+                    
+                    # 2. Token Expiry Check (403 Forbidden or 410 Gone)
+                    if resp.status_code in (403, 410):
+                        if hasattr(self, 'refresh_url') and self.refresh_url:
+                            # Fetch a fresh signed URL using the original item_url (page URL)
+                            new_url = self.refresh_url(url)
+                            if new_url:
+                                active_url = new_url
+                                resp.close()
+                                time.sleep(1)
+                                continue # Jump to the next attempt with the new token
+                        
+                        return ('http_error', resp.status_code, url[:60])
+
+                    # Allow 200 (OK) and 206 (Partial Content)
+                    if resp.status_code not in (200, 206):
                         return ('http_error', resp.status_code, url[:60])
 
                     filename = self._get_filename(resp.url, resp)
-                    original_filename = filename
                     filename = _fit_output_filename(filepath, filename)
-                    if filename != original_filename:
-                        _log(
-                            f'Shortened output filename to fit Windows path limit: '
-                            f'{filename}'
-                        )
                     full_path = os.path.join(filepath, filename)
+
+                    # 3. Calculate expected length accurately (handling 206 Content-Range)
                     expected_length = None
-                    content_encoding = str(
-                        resp.headers.get('Content-Encoding', 'identity')
-                    ).lower()
+                    content_encoding = str(resp.headers.get('Content-Encoding', 'identity')).lower()
                     if content_encoding in ('', 'identity'):
                         try:
-                            expected_length = int(resp.headers.get('Content-Length', ''))
-                            if expected_length < 0:
+                            if resp.status_code == 206:
+                                content_range = resp.headers.get('Content-Range', '')
+                                if content_range:
+                                    expected_length = int(content_range.split('/')[-1])
+                            else:
+                                expected_length = int(resp.headers.get('Content-Length', ''))
+                                
+                            if expected_length is not None and expected_length < 0:
                                 expected_length = None
-                        except (TypeError, ValueError):
+                        except (TypeError, ValueError, IndexError):
                             pass
+
+                    # 4. Set write mode (Append if resuming, Write if fresh)
+                    mode = 'wb'
                     if os.path.exists(full_path) and os.path.getsize(full_path) > 0:
-                        existing_size = os.path.getsize(full_path)
-                        if expected_length is None or existing_size == expected_length:
+                        current_file_size = os.path.getsize(full_path)
+                        
+                        if expected_length and current_file_size == expected_length:
                             return ('skip', filename)
-                        os.remove(full_path)
+                            
+                        if resp.status_code == 206:
+                            mode = 'ab'
+                            downloaded = current_file_size
+                            existing_size = current_file_size
+                        else:
+                            # Server ignored Range; start over
+                            os.remove(full_path)
+                            mode = 'wb'
 
                     start_time = time.time()
                     cancel_occurred = False
-                    with open(full_path, 'wb') as f:
+                    
+                    with open(full_path, mode) as f:
                         for chunk in resp.iter_content(chunk_size=65536):
                             if cancel_event and cancel_event.is_set():
                                 cancel_occurred = True
@@ -2120,19 +2159,16 @@ class DownloadManager:
                             if chunk:
                                 f.write(chunk)
                                 downloaded += len(chunk)
-                                if self.max_speed_bps > 0:
+                                if getattr(self, 'max_speed_bps', 0) > 0:
                                     elapsed = time.time() - start_time
-                                    expected = downloaded / self.max_speed_bps
+                                    newly_downloaded = downloaded - (existing_size if mode == 'ab' else 0)
+                                    expected = newly_downloaded / self.max_speed_bps
                                     if elapsed < expected:
                                         time.sleep(expected - elapsed)
 
-                    if (
-                        expected_length is not None
-                        and downloaded != expected_length
-                    ):
+                    if expected_length is not None and downloaded != expected_length:
                         raise requests.exceptions.ChunkedEncodingError(
-                            f"Expected {expected_length} bytes but received "
-                            f"{downloaded}"
+                            f"Expected {expected_length} bytes but received {downloaded}"
                         )
 
                     if cancel_occurred:
@@ -2140,43 +2176,34 @@ class DownloadManager:
                             os.remove(full_path)
                         return ('cancelled', filename)
 
-                    # Fix extension from magic bytes (catches .bin / no-ext / wrong-ext)
-                    try:
-                        new_path = _fix_extension(full_path)
-                        if new_path != full_path:
-                            filename = os.path.basename(new_path)
-                    except Exception:
-                        pass
-
                     return ('ok', filename, downloaded)
+
                 except (
                     requests.exceptions.RequestException,
                     http.client.IncompleteRead,
                     ConnectionError,
                     TimeoutError,
                 ) as e:
-                    if full_path and os.path.exists(full_path):
-                        try:
-                            os.remove(full_path)
-                        except OSError as cleanup_error:
-                            return (
-                                'stream_error',
-                                f'{e}; could not remove partial file: {cleanup_error}',
-                                filename,
-                                downloaded,
-                            )
+                    # 5. Do NOT delete the file on a mid-stream crash unless out of retries
                     if attempt == max_attempts - 1:
+                        if full_path and os.path.exists(full_path):
+                            try:
+                                os.remove(full_path)
+                            except OSError as cleanup_error:
+                                pass
                         return (
                             'stream_error',
                             f'{e} (after {max_attempts} attempts)',
                             filename,
                             downloaded,
                         )
-                    time.sleep(2 ** attempt)
+                        
+                    # Backoff before trying to resume or refresh
+                    time.sleep(60 * (2 ** attempt))
+                    
                 finally:
                     if resp is not None:
                         resp.close()
-            return ('stream_error', 'Download failed after retries', "", 0)
 
         # Dispatch blocking work to the default thread pool
         loop = asyncio.get_event_loop()
@@ -2435,7 +2462,7 @@ class DownloadManager:
         model_name: str,
         progress_callback=None,
         cancel_event=None,
-        streaming_resolve: bool = True,
+        streaming_resolve: bool = False,
     ) -> DownloadStats:
         """Run full download from a posts.json file.
 
@@ -3106,11 +3133,11 @@ class DownloadManager:
 
 def run_download(posts_json_path: str, model_name: str, output_base: str = 'output',
                  max_speed_bps: int = 1_000_000, progress_callback=None, log_callback=None,
-                 max_concurrent: int = 3, cancel_event=None,
+                 max_concurrent: int = 1, cancel_event=None,
                  pixeldrain_api_key: str = "",
                  pixeldrain_cookies_json: str = "",
                  models_data_dir: str | None = None,
-                 streaming_resolve: bool = True) -> dict:
+                 streaming_resolve: bool = False) -> dict:
     """Synchronous entry point for calling from app.py.
 
     Args:
@@ -3150,7 +3177,7 @@ def retry_failed_urls(
     failed_entries: list[tuple[str, int, int]],
     model_name: str,
     output_base: str = 'output',
-    max_concurrent: int = 3,
+    max_concurrent: int = 1,
     log_callback=None,
     cancel_event=None,
 ) -> dict:
