@@ -1,0 +1,7 @@
+beautifulsoup4>=4.12
+questionary>=2.0.0
+rich>=13.0.0
+requests>=2.31
+urllib3>=2.0
+playwright>=1.50
+mega.py>=1.0
